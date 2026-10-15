@@ -161,7 +161,7 @@ Both models were scored on the same S-1 sequence they were trained on.
 
 
 
-![Model comparison](images/model-comparison.png)
+![Model comparison](https://github.com/piyushops01/spacecraft-telemetry-anomaly-detection/blob/main/comparision.png)
 
 **Summary of findings**
 
