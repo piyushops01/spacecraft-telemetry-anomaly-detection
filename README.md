@@ -160,7 +160,8 @@ Both models were scored on the same S-1 sequence they were trained on.
 | Dense Autoencoder | 0.7493 | 0.6138 | 0.6748 |
 
 
-![Model comparison](images/comparison.png)
+
+![Model comparison](images/model-comparison.png)
 
 **Summary of findings**
 
