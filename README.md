@@ -7,7 +7,7 @@ Unsupervised anomaly detection on spacecraft telemetry from the **NASA SMAP & MS
 
 The project uses telemetry channel **S-1** from SMAP as a worked example, from loading and exploring the data through training, scoring, and comparing both models.
 
-> **Important:** Both models were evaluated on the same sequence they were trained on. The reported scores are **not** held-out test performance and should **not** be read as evidence that the models generalize to other telemetry channels. See [Limitations](#limitations).
+> **Evaluation corrected:** Models fit only the chronological training prefix. Autoencoder calibration uses validation data, and final metrics use the independent official S-1 test split. The notebook contains graphs and outputs from the latest complete S-1 run.
 
 ---
 
@@ -54,144 +54,122 @@ Spacecraft generate large volumes of telemetry (sensor readings and command/stat
 
 ### Channel used: S-1 (SMAP)
 
-Summary of the `S-1.npy` array used in this project:
+The official dataset has **two files named `S-1.npy`**, in separate `train/` and `test/` directories. `T-1.npy` identifies another SMAP channel; it is not the S-1 test split. This project uses the official S-1 pair.
 
-| Statistic | Value |
-|---|---|
-| Signal length | 7,331 time steps |
-| Minimum | -1.0 |
-| Maximum | ~1.0 |
-| Mean | ~ -0.157 |
-| Features | 25 |
-
-**Feature structure.** Only feature 0 is nonzero at every time step. Most of the remaining features are sparse, with only a handful of nonzero values across the whole sequence, and several are entirely zero. This is consistent with command or flag features that are mostly inactive. The standard deviation of feature 0 is about 0.46, far larger than that of any other feature.
-
-**Visible anomaly.** The plot of feature 0 shows a clear flat stretch at -1.0 around time steps ~5,360 to ~5,500, followed by a region of rapid swings between the extremes around ~5,500 to ~5,600.
+The supplied S-1 metadata expects **7,331 test time steps**, with the zero-based inclusive anomaly interval **[5300, 5747]** (448 anomalous points). The notebook checks this against the actual test length and rejects invalid intervals rather than clipping them. Array rows are time steps; only column 0 is selected as telemetry, without flattening the other features into time.
 
 ---
 
 ## Project Structure
 
-```
+```text
 .
-├── spacecraft-anomaly-detection.ipynb   # Full notebook (data, models, evaluation)
-├── data/                                # NASA .npy files and labeled_anomalies.csv (not tracked)
-├── images/                              # Saved plots (signal, predictions, comparison chart)
-│   └── comparison.png
-|   └── isolation-forest-predicted-anomalies.png
-|   └── autoencoder-obervation.png
-├── requirements.txt
-└── README.md
+|-- spacecraft_anomaly_detection.ipynb  # Complete corrected experiment
+|-- README.md
+|-- labeled_anomalies.csv
+|-- requirements.txt
+|-- tests/test_notebook.py                 # Synthetic regression checks
+|-- data/
+|   |-- train/S-1.npy                     # Official training split (supply separately)
+|   `-- test/S-1.npy                      # Official independent test split
+`-- results/                             # Generated only when the notebook runs
+    |-- test_metrics.csv
+    |-- test_predictions.csv
+    `-- run_metadata.json
 ```
 
 ---
+
 
 ## Setup
 
 ### Requirements
 
-- Python 3.9+
-- numpy
-- pandas
-- matplotlib
-- scikit-learn
-- tensorflow / keras (for the autoencoder)
+Use Python 3.11+ with compatible NumPy, pandas, matplotlib, Seaborn, scikit-learn, TensorFlow, and Jupyter versions:
 
 ```bash
-pip install numpy pandas matplotlib scikit-learn tensorflow
+python -m pip install -r requirements.txt
 ```
 
 ### Get the data
 
-Download the dataset from the [telemanom repository](https://github.com/khundman/telemanom) (see its README for the data download link), then place the files so the notebook can find them. In Google Colab, upload them to `/content/`:
-
-```python
-S1 = np.load("/content/S-1.npy")
-```
+Obtain the official data through the [Telemanom repository](https://github.com/khundman/telemanom#data). Preserve the `train/` and `test/` directory names and copy the S-1 arrays into the layout above. The local workspace has the S-1 arrays under `data/`; this directory is excluded from Git, so a fresh clone must supply the arrays. Do not copy a single array into both directories, or substitute the T-1 channel.
 
 ### Run
 
-Open `spacecraft-anomaly-detection.ipynb` in Jupyter or Google Colab and run the cells in order.
+In VS Code, select the project `.venv/Scripts/python.exe` as the notebook kernel (the system Python may not have all dependencies). Open `spacecraft_anomaly_detection.ipynb` in Jupyter and use **Restart Kernel and Run All** from this project directory. In Colab, upload the same directory layout and adjust `DATA_DIR` and `LABEL_PATH` in the configuration cell. There is no mandatory Colab dependency.
+
+The notebook raises explicit errors for missing files, duplicate arrays, incompatible shapes, mismatched metadata, and invalid intervals. A matching length is a sanity check, not proof of split provenance.
+
+Run the regression checks with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+These checks use temporary synthetic telemetry and do not create research performance claims.
 
 ---
 
 ## Methodology
 
-### 1. Data exploration
+### 1. Training and validation
 
-- Loaded `S-1.npy` and inspected its length, range, and mean
-- Plotted the telemetry signal over time
-- Counted nonzero values and computed the standard deviation per feature to understand which features carry signal
+Reserve the final 10% of the official training sequence for chronological validation. Compute telemetry value, first difference, trailing 20-step mean, and trailing standard deviation without future samples, shuffling, or dropping rows. Validation features retain preceding training history. Test history starts fresh because split adjacency is not guaranteed.
 
-### 2. Isolation Forest (baseline)
+Fit `StandardScaler` on only the first 90% of training features. Transform validation and test features with that scaler. Both models fit this same training prefix; neither is refitted on the validation tail or test data.
 
-Isolation Forest isolates observations by randomly splitting the feature space. Points that are isolated with fewer splits are scored as more anomalous.
+### 2. Isolation Forest
 
-- Fit on the telemetry data
-- Used a contamination setting so that roughly **2% of readings** are flagged as anomalies
-- Plotted predicted anomalies over the telemetry signal
-
-**Observed behavior:** The flagged points concentrate in the high-amplitude region around steps ~5,500-5,600, with one isolated flag near ~5,360. The flat -1.0 stretch is visually the most obvious anomaly but is largely **not** flagged. Isolation Forest scores each point independently of its neighbors, and -1.0 is a value within the observed range, so a flat run is not unusual point by point.
+Preserve 100 trees, contamination 0.02, and seed 42. Fit on `X_train`, then predict on `X_test`. The decision offset comes from training scores; 0.02 does not guarantee a 2% anomaly rate on independent test data.
 
 ### 3. Dense autoencoder
 
-An autoencoder is trained to reconstruct its input through a narrow bottleneck. It reconstructs normal patterns well and abnormal patterns poorly, so **high reconstruction error indicates a possible anomaly**.
+Preserve the 4 → 8 → 3 → 8 → 4 dense architecture (ReLU hidden layers, linear output), Adam/MSE, 15 epochs, batch size 128, and `shuffle=False`. Use explicit chronological validation data. Inputs and reconstruction targets are both `X_train`, which is correct for an autoencoder.
 
-- Built a fully connected (dense) autoencoder
-- Trained it on the telemetry data
-- Computed the per-sample reconstruction error
-- Plotted the errors and flagged samples above a threshold
+Set the anomaly threshold to the fixed **95th percentile of validation reconstruction errors**. Compute final reconstruction errors and predictions on `X_test`. No test labels, test error percentiles, or test F1 optimization influence the threshold. This is a fixed unsupervised heuristic, not a guarantee of calibrated false positive rates.
 
-> This is a **dense** autoencoder, not an LSTM. It does not model temporal dependencies directly.
+### 4. Final evaluation and visualizations
 
-### 4. Evaluation
+Read S-1/SMAP test labels from the CSV for the original metadata exploration and final evaluation. Labels do not enter feature scaling, model fitting, or threshold calibration. Convert inclusive intervals with `labels[start:end + 1] = 1`; require one matching row, the exact test length, and in-bounds integer endpoints. There is only one test label vector, `y_test`.
 
-Both models were scored with a shared `evaluate_model()` function against the labeled anomaly ranges, reporting **precision**, **recall**, and **F1**. A comparison chart summarizes the results.
+Use one shared evaluation function for precision, recall, F1, and confusion matrices, with anomaly as class 1 and `zero_division=0`. These are **point-wise** metrics, without point adjustment or event-based credit. Matplotlib and Seaborn plots include the training distribution and feature correlations, telemetry from both raw splits, actual test intervals, each model's test flags, validation learning curves, test reconstruction errors against the validation threshold, confusion matrices, and dynamically calculated comparison bars.
+
+Model settings are fixed before test prediction. Any later tuning based on these test results would require a new independent evaluation set.
 
 ---
 
 ## Results
 
-Both models were scored on the same S-1 sequence they were trained on.
+Latest complete local S-1 run (point-wise evaluation; 7,331 test readings):
 
 | Model | Precision | Recall | F1 |
-|---|---|---|---|
-| Isolation Forest | 1.0000	 | 0.1853 | 0.3126 |
-| Dense Autoencoder | 0.7493 | 0.6138 | 0.6748 |
+|---|---:|---:|---:|
+| Isolation Forest | 0.5825 | 0.4018 | 0.4756 |
+| Dense Autoencoder | 0.3631 | 0.6451 | 0.4646 |
 
+Graphs and executed outputs are saved in the notebook. These single-channel results do not establish statistical superiority or generalization.
 
-
-![Model comparison](https://github.com/piyushops01/spacecraft-telemetry-anomaly-detection/blob/main/images/exploratory-model-comparision.png)
-
-**Summary of findings**
-
-- The dense autoencoder achieved a higher recall and F1 score than Isolation Forest on this sequence.
-- Isolation Forest flagged about 2% of readings, mostly in the high-amplitude anomalous region.
-- Both models are sensitive to their thresholding choice (contamination for Isolation Forest, error threshold for the autoencoder), which directly shifts the precision/recall trade-off.
+A successful full run generates the comparison table, charts, and conclusions directly from current predictions. `results/test_metrics.csv` stores actual precision/recall/F1, `test_predictions.csv` stores aligned labels and predictions, and `run_metadata.json` records split hashes, paths, parameters, threshold, sample counts, seed, and package versions. No model ranking is asserted until a real test run completes.
 
 ---
 
 ## Limitations
 
-Please read these before drawing conclusions from the results.
-
-- **Train and evaluation overlap.** Both models were evaluated on the same sequence used for training. This is not a valid held-out test, and the scores are likely optimistic.
-- **Official split not verified.** The official train/test split from the dataset was not verified or used for the reported results.
-- **Single channel.** Only channel S-1 was analyzed. The results do not show that either model generalizes to other SMAP or MSL channels.
-- **No temporal modeling.** Both models treat samples largely independently, so they can miss anomalies defined by a pattern over time, such as the flat -1.0 segment.
-- **Threshold sensitivity.** Reported scores depend on the chosen contamination rate and reconstruction-error threshold.
-- **Point-wise metrics.** Anomalies in this dataset are contiguous ranges, and point-wise precision/recall can under- or over-state how well a range was detected.
+- **Single channel:** S-1 results do not establish generalization to other SMAP/MSL channels or statistical superiority.
+- **Limited temporal context:** Rolling features add past context, but the dense autoencoder is not a sequence model.
+- **Threshold sensitivity:** Fixed contamination and validation percentile affect the precision/recall tradeoff. Validation contamination or distribution shift may undermine calibration.
+- **Point-wise metrics:** Long events receive more weight; these metrics do not measure detection delay or event coverage.
+- **Reproducibility:** Seeds and deterministic TensorFlow operations improve repeatability. Hardware and dependency versions can still affect numerical results; run metadata records versions rather than claiming cross-platform bitwise equivalence.
+- **Provenance:** Hash and shape checks reject obvious overlap and misalignment but cannot prove files were obtained from the official splits.
 
 ---
 
 ## Future Work
 
-- Train on the official **train** split and evaluate on the official **test** split
-- Run across **all SMAP and MSL channels** and report aggregate results
-- Add **temporal context** with sliding windows as model input
-- Try an **LSTM autoencoder** or LSTM forecaster with dynamic thresholding, as in the original paper
-- Use **range-based or event-based evaluation** metrics suited to contiguous anomalies
-- Tune thresholds on a validation split rather than on the evaluation data
+- Evaluate additional channels with a separate development protocol and aggregate results.
+- Compare temporal models and range/event metrics, including detection delay.
+- Study validation-only threshold robustness without selecting configurations on the final test labels.
 
 ---
 
